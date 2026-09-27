@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function Home() {
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-6 py-24 text-center">
@@ -7,6 +9,12 @@ export default function Home() {
       <p className="mt-4 max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
         Every book has a journey. Swap one, and leave a note for the next reader.
       </p>
+      <Link
+        href="/about"
+        className="mt-8 text-base font-medium underline underline-offset-4"
+      >
+        How it works
+      </Link>
     </main>
   );
 }

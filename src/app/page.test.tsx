@@ -9,4 +9,11 @@ describe("Home page", () => {
       screen.getByRole("heading", { level: 1, name: "The Wandering Library" }),
     ).toBeInTheDocument();
   });
+
+  it("links to the About page", () => {
+    render(<Home />);
+    expect(
+      screen.getByRole("link", { name: "How it works" }),
+    ).toHaveAttribute("href", "/about");
+  });
 });
