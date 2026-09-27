@@ -1,0 +1,90 @@
+# STAGE 1 — BUILD
+# Add the "ready" label to a story issue → Claude writes tests + code and opens a PR.
+name: "1 · Build story"
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: story-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event.label.name == 'ready'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write # required for the Claude GitHub App login
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Mark story as in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue edit ${{ github.event.issue.number }} --add-label "building" --remove-label "ready"
+
+      - name: Claude builds the story
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            STORY ISSUE: #${{ github.event.issue.number }}
+
+            You are the BUILD agent for The Wandering Library.
+            Follow CLAUDE.md exactly — it is your rulebook.
+
+            1. Read the story with `gh issue view ${{ github.event.issue.number }}`.
+            2. Write Playwright tests in e2e/story-${{ github.event.issue.number }}-<slug>.spec.ts,
+               one test per acceptance-criteria scenario, plus unit tests for any logic.
+            3. Implement the smallest change that makes them pass.
+            4. Run `npm run check`, `npm run build` and `npx playwright test --project=desktop`.
+               Fix until all pass. Do not skip or weaken tests to make them pass.
+            5. Commit with message "Story #${{ github.event.issue.number }}: <title>" and push your branch.
+            6. Open a PR with `gh pr create` titled "Story #${{ github.event.issue.number }}: <title>",
+               using .github/pull_request_template.md, with "Closes #${{ github.event.issue.number }}" in the body.
+            7. Comment on the issue with the PR link and a two-line summary.
+
+            If the story is too vague or too big to build safely, do not write code:
+            comment on the issue explaining what's missing and stop.
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 80
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(npm run:*),Bash(npm install:*),Bash(npx playwright test:*),Bash(npx tsc:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh pr create:*),Bash(gh pr view:*)"
+
+      - name: Check a PR was opened
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          pr=$(gh pr list --state open --json number,headRefName,body \
+            --jq "map(select((.headRefName | startswith(\"claude/issue-$ISSUE-\")) or (.body | test(\"Closes #$ISSUE\\\\b\")))) | .[0].number // empty")
+          if [ -n "$pr" ]; then
+            echo "PR #$pr opened for story #$ISSUE"
+            gh issue edit "$ISSUE" --remove-label "building" --add-label "in-review"
+          else
+            gh issue edit "$ISSUE" --remove-label "building" --add-label "needs-human"
+            gh issue comment "$ISSUE" --body "⚠️ The build agent finished without opening a PR. Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}), refine the story, then add the **ready** label again."
+            exit 1
+          fi

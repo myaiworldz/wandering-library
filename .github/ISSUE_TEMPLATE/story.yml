@@ -1,0 +1,51 @@
+name: User story
+description: A small, testable slice of the product. Add the "ready" label to start the build.
+title: "Story: "
+labels: ["story"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep it small: roughly one screen or one behaviour.
+        When you're happy with it, add the **ready** label and the build agent starts.
+  - type: textarea
+    id: story
+    attributes:
+      label: User story
+      description: Who wants what, and why.
+      placeholder: As a reader, I want to ..., so that ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: One scenario per block. Each becomes an automated test.
+      placeholder: |
+        Scenario: Visitor sees the site name
+          Given I am a visitor
+          When I open the homepage
+          Then I see "The Wandering Library" as the main heading
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: What this story deliberately does NOT include.
+      placeholder: "- Sign-in\n- Styling beyond the basics"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes, designs or data changes
+      description: Optional. Screenshots, copy, or any new data the story needs.
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      options:
+        - Small (one screen or behaviour)
+        - Medium (a couple of screens)
+        - Large — please split it
+    validations:
+      required: true

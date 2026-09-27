@@ -1,0 +1,173 @@
+# STAGE 2 — REVIEW (+ automatic fix loop)
+# A separate Claude run with fresh context reviews every PR against REVIEW_RULES.md.
+# On agent-built PRs (claude/* branches) it asks the builder to fix blocking issues,
+# up to MAX_ROUNDS times, then hands over to you.
+name: "2 · AI review"
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  MAX_ROUNDS: 3
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    outputs:
+      verdict: ${{ steps.result.outputs.verdict }}
+      issues: ${{ steps.result.outputs.issues }}
+      round: ${{ steps.round.outputs.round }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Work out review round
+        id: round
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          done=$(gh pr view ${{ github.event.pull_request.number }} --json comments \
+            --jq '[.comments[].body | select(startswith("### 🤖 AI review"))] | length')
+          echo "round=$((done + 1))" >> "$GITHUB_OUTPUT"
+
+      - name: Claude reviews the PR
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are the REVIEW agent. You did not write this code.
+            Read .github/REVIEW_RULES.md and CLAUDE.md, then review this PR.
+
+            - Use `gh pr view` to find the linked story ("Closes #N") and read it with `gh issue view N`.
+            - Use `gh pr diff` to see the changes; read surrounding files as needed.
+            - Post inline comments on specific lines for concrete problems.
+            - Do NOT post a summary comment — return your verdict in the structured output.
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 30
+            --allowedTools "Read,Glob,Grep,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*)"
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["APPROVE","CHANGES_REQUESTED"]},"summary":{"type":"string"},"blocking_issues":{"type":"array","items":{"type":"string"}}},"required":["verdict","summary","blocking_issues"]}'
+
+      - name: Post review summary
+        id: result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ steps.review.outputs.structured_output }}
+          ROUND: ${{ steps.round.outputs.round }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          verdict=$(jq -r '.verdict' <<< "$OUT")
+          summary=$(jq -r '.summary' <<< "$OUT")
+          issues=$(jq -r '.blocking_issues | to_entries | map("\(.key + 1). \(.value)") | join("\n")' <<< "$OUT")
+          {
+            echo "### 🤖 AI review — round $ROUND of $MAX_ROUNDS"
+            echo
+            if [ "$verdict" = "APPROVE" ]; then echo "**VERDICT: APPROVE** ✅"; else echo "**VERDICT: CHANGES_REQUESTED** 🔧"; fi
+            echo
+            echo "$summary"
+            if [ -n "$issues" ]; then echo; echo "**Blocking issues**"; echo "$issues"; fi
+          } > body.md
+          gh pr comment "$PR" --body-file body.md
+
+          if [ "$verdict" = "APPROVE" ]; then
+            gh pr edit "$PR" --add-label "ai-approved" --remove-label "ai-changes-requested" || true
+          else
+            gh pr edit "$PR" --add-label "ai-changes-requested" --remove-label "ai-approved" || true
+          fi
+
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          {
+            echo "issues<<EOF_ISSUES"
+            echo "$issues"
+            echo "EOF_ISSUES"
+          } >> "$GITHUB_OUTPUT"
+
+  fix:
+    # Only for agent-built PRs, and only while rounds remain.
+    needs: review
+    if: >-
+      needs.review.outputs.verdict == 'CHANGES_REQUESTED' &&
+      startsWith(github.head_ref, 'claude/') &&
+      fromJSON(needs.review.outputs.round) < 3
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 20
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Claude fixes review findings
+        uses: anthropics/claude-code-action@v1
+        env:
+          REVIEW_ISSUES: ${{ needs.review.outputs.issues }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are the BUILD agent. The reviewer found blocking issues in your PR.
+            Follow CLAUDE.md. The blocking issues are:
+
+            ${{ needs.review.outputs.issues }}
+
+            Also read the reviewer's inline comments with `gh pr view --comments`.
+            Fix each blocking issue with the smallest change, keep all tests passing
+            (`npm run check`, `npm run build`, `npx playwright test --project=desktop`),
+            then commit "Address review round ${{ needs.review.outputs.round }}" and push.
+            If you disagree with a finding, don't change code for it — explain why in a PR comment.
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 60
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(npm run:*),Bash(npm install:*),Bash(npx playwright test:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh issue view:*)"
+
+  hand-over:
+    # Out of rounds: stop the loop and ask a human.
+    needs: review
+    if: >-
+      needs.review.outputs.verdict == 'CHANGES_REQUESTED' &&
+      startsWith(github.head_ref, 'claude/') &&
+      fromJSON(needs.review.outputs.round) >= 3
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr edit "$PR" --repo "${{ github.repository }}" --add-label "needs-human"
+          gh pr comment "$PR" --repo "${{ github.repository }}" --body "🛑 Review loop stopped after $MAX_ROUNDS rounds. Over to you — fix it by hand, or comment \`@claude <instructions>\` to guide the agent."
