@@ -16,4 +16,21 @@ describe("Home page", () => {
       screen.getByRole("link", { name: "How it works" }),
     ).toHaveAttribute("href", "/about");
   });
+
+  it("shows a sample book journey with the book title and author", () => {
+    render(<Home />);
+    expect(
+      screen.getByRole("heading", { name: "A book's journey" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("The Little Prince by Antoine de Saint-Exupéry")).toBeInTheDocument();
+  });
+
+  it("shows the readers' notes in order, oldest first", () => {
+    render(<Home />);
+    const notes = screen.getAllByRole("listitem");
+    expect(notes).toHaveLength(3);
+    expect(notes[0]).toHaveTextContent("Priya, Norwich");
+    expect(notes[1]).toHaveTextContent("Tom, Cambridge");
+    expect(notes[2]).toHaveTextContent("Aisha, Ipswich");
+  });
 });
